@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cloth Simulation — PBD / XPBD</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#12121e;color:#ccc;
+  font-family:'Segoe UI',system-ui,sans-serif;
+  display:flex;flex-direction:column;align-items:center;
+  min-height:100vh;padding:18px 10px;
+}
+h1{font-size:1.35rem;color:#66bbee;margin-bottom:12px;letter-spacing:.5px}
+#main{display:flex;gap:18px;flex-wrap:wrap;justify-content:center}
+canvas{
+  border:1px solid #2a2a4a;border-radius:6px;
+  background:#1a1a2e;display:block;
+  touch-action:none;
+}
+#controls{
+  width:230px;background:#16162a;border:1px solid #2a2a4a;
+  border-radius:6px;padding:16px 14px;
+  display:flex;flex-direction:column;gap:10px;
+  font-size:.82rem;
+}
+#controls label{color:#8899aa;font-weight:600;display:block;margin-bottom:2px}
+#controls select,#controls input[type=range]{
+  width:100%;margin-top:2px;
+}
+select{
+  background:#1e1e36;color:#ccc;border:1px solid #3a3a5a;
+  border-radius:4px;padding:5px 6px;font-size:.82rem;
+}
+optgroup{color:#88aacc;font-style:normal}
+optgroup option{color:#ccc}
+input[type=range]{accent-color:#44aadd}
+.val{color:#44ddff;float:right;font-family:monospace}
+.group{border-bottom:1px solid #222240;padding-bottom:9px}
+.toggle{display:flex;align-items:center;gap:8px}
+.toggle input{width:auto;accent-color:#44aadd}
+
+#overlay{
+  position:fixed;inset:0;background:rgba(10,10,20,.92);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  z-index:100;transition:opacity .4s;
+}
+#overlay.hidden{opacity:0;pointer-events:none}
+.spinner{
+  width:48px;height:48px;border:4px solid #333;
+  border-top-color:#44aadd;border-radius:50%;
+  animation:spin .8s linear infinite;margin-bottom:18px;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+#overlay p{color:#7799aa;font-size:.95rem}
+#overlay .sub{color:#556677;font-size:.8rem;margin-top:6px}
+
+footer{margin-top:16px;color:#445;font-size:.75rem}
+</style>
+</head>
+<body>
+
+<h1>Cloth Simulation &mdash; PBD / XPBD</h1>
+
+<div id="main">
+  <canvas id="c" width="800" height="600"></canvas>
+
+  <div id="controls">
+    <div class="group">
+      <label>Scene</label>
+      <select id="scene">
+        <optgroup label="1 · Hanging from Fixed Points">
+          <option value="0">Single center point</option>
+          <option value="1">Two top corners</option>
+          <option value="2">Three spread points</option>
+          <option value="3">Full top edge</option>
+        </optgroup>
+        <optgroup label="2 · Floor &amp; Ball Collisions">
+          <option value="4">Free fall to floor</option>
+          <option value="5">Drop onto ball</option>
+          <option value="6">Dense crumple (self-col)</option>
+        </optgroup>
+        <optgroup label="3 · Overconstrained Stretch">
+          <option value="7">Two distant corners</option>
+          <option value="8">Four corners spread</option>
+          <option value="9">Compressed edges</option>
+        </optgroup>
+      </select>
+    </div>
+
+    <div class="group">
+      <label>Solver</label>
+      <select id="solver">
+        <option value="0">PBD / XPBD</option>
+        <option value="1">Projective Dynamics (stub)</option>
+        <option value="2">VBD (stub)</option>
+      </select>
+    </div>
+
+    <div class="group">
+      <label>Iterations <span class="val" id="iterV">15</span></label>
+      <input type="range" id="iter" min="1" max="50" value="15">
+    </div>
+
+    <div class="group">
+      <label>Stiffness <span class="val" id="stiffV">0.80</span></label>
+      <input type="range" id="stiff" min="0" max="1" step="0.01" value="0.80">
+    </div>
+
+    <div class="group">
+      <label>Damping <span class="val" id="dampV">0.998</span></label>
+      <input type="range" id="damp" min="0.90" max="1.00" step="0.001" value="0.998">
+    </div>
+
+    <div class="group">
+      <label>Restitution <span class="val" id="restV">0.30</span></label>
+      <input type="range" id="rest" min="0" max="1" step="0.01" value="0.30">
+    </div>
+
+    <div class="group">
+      <label>Floor Friction <span class="val" id="ffricV">0.25</span></label>
+      <input type="range" id="ffric" min="0" max="1" step="0.01" value="0.25">
+    </div>
+
+    <div class="toggle">
+      <input type="checkbox" id="selfcol">
+      <label for="selfcol" style="margin:0;cursor:pointer">Self-Collision</label>
+    </div>
+  </div>
+</div>
+
+<footer>Python + NumPy via Pyodide &middot; rendered on &lt;canvas&gt;</footer>
+
+<!-- Loading overlay -->
+<div id="overlay">
+  <div class="spinner"></div>
+  <p id="loadMsg">Loading Pyodide runtime&hellip;</p>
+  <p class="sub">First load downloads ~15 MB (cached afterwards)</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
+<script>
+/* Slider value labels */
+const sliders=[
+  ["iter","iterV",0],["stiff","stiffV",2],["damp","dampV",3],
+  ["rest","restV",2],["ffric","ffricV",2]
+];
+sliders.forEach(([id,lbl,dec])=>{
+  document.getElementById(id).addEventListener("input",e=>{
+    document.getElementById(lbl).textContent=
+      dec?parseFloat(e.target.value).toFixed(dec):e.target.value;
+  });
+});
+
+(async()=>{
+  const msg=document.getElementById("loadMsg");
+  try{
+    msg.textContent="Loading Pyodide runtime\u2026";
+    const pyodide=await loadPyodide();
+
+    msg.textContent="Loading NumPy\u2026";
+    await pyodide.loadPackage("numpy");
+
+    msg.textContent="Starting simulation\u2026";
+    const resp=await fetch("simulation.py");
+    const code=await resp.text();
+    await pyodide.runPythonAsync(code);
+
+    document.getElementById("overlay").classList.add("hidden");
+  }catch(err){
+    msg.textContent="Error: "+err.message;
+    console.error(err);
+  }
+})();
+</script>
+</body>
+</html>
