@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cloth Simulation — PBD / XPBD</title>
+<title>3-D Cloth Simulation — PBD / XPBD</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{
@@ -26,9 +26,7 @@ canvas{
   font-size:.82rem;
 }
 #controls label{color:#8899aa;font-weight:600;display:block;margin-bottom:2px}
-#controls select,#controls input[type=range]{
-  width:100%;margin-top:2px;
-}
+#controls select,#controls input[type=range]{width:100%;margin-top:2px}
 select{
   background:#1e1e36;color:#ccc;border:1px solid #3a3a5a;
   border-radius:4px;padding:5px 6px;font-size:.82rem;
@@ -42,7 +40,7 @@ input[type=range]{accent-color:#44aadd}
 .toggle input{width:auto;accent-color:#44aadd}
 
 #overlay{
-  position:fixed;inset:0;background:rgba(10,10,20,.92);
+  position:fixed;inset:0;background:rgba(10,10,20,.93);
   display:flex;flex-direction:column;align-items:center;justify-content:center;
   z-index:100;transition:opacity .4s;
 }
@@ -53,15 +51,19 @@ input[type=range]{accent-color:#44aadd}
   animation:spin .8s linear infinite;margin-bottom:18px;
 }
 @keyframes spin{to{transform:rotate(360deg)}}
-#overlay p{color:#7799aa;font-size:.95rem}
-#overlay .sub{color:#556677;font-size:.8rem;margin-top:6px}
+#loadMsg{color:#7799aa;font-size:.95rem}
+#loadSub{color:#556677;font-size:.8rem;margin-top:6px}
+#loadFiles{
+  margin-top:14px;color:#445566;font-size:.72rem;font-family:monospace;
+  max-width:340px;text-align:center;line-height:1.7;
+}
 
 footer{margin-top:16px;color:#445;font-size:.75rem}
 </style>
 </head>
 <body>
 
-<h1>Cloth Simulation &mdash; PBD / XPBD</h1>
+<h1>3-D Cloth Simulation &mdash; PBD / XPBD</h1>
 
 <div id="main">
   <canvas id="c" width="800" height="600"></canvas>
@@ -130,46 +132,107 @@ footer{margin-top:16px;color:#445;font-size:.75rem}
   </div>
 </div>
 
-<footer>Python + NumPy via Pyodide &middot; rendered on &lt;canvas&gt;</footer>
+<footer>3-D Python + NumPy via Pyodide &middot; perspective-projected on &lt;canvas&gt;</footer>
 
 <!-- Loading overlay -->
 <div id="overlay">
   <div class="spinner"></div>
   <p id="loadMsg">Loading Pyodide runtime&hellip;</p>
-  <p class="sub">First load downloads ~15 MB (cached afterwards)</p>
+  <p id="loadSub">First load downloads ~15 MB (cached afterwards)</p>
+  <div id="loadFiles"></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
 <script>
-/* Slider value labels */
-const sliders=[
-  ["iter","iterV",0],["stiff","stiffV",2],["damp","dampV",3],
-  ["rest","restV",2],["ffric","ffricV",2]
+/* ------------------------------------------------------------------ */
+/* Slider value labels                                                  */
+/* ------------------------------------------------------------------ */
+const SLIDERS = [
+  ["iter",  "iterV",  0],
+  ["stiff", "stiffV", 2],
+  ["damp",  "dampV",  3],
+  ["rest",  "restV",  2],
+  ["ffric", "ffricV", 2],
 ];
-sliders.forEach(([id,lbl,dec])=>{
-  document.getElementById(id).addEventListener("input",e=>{
-    document.getElementById(lbl).textContent=
-      dec?parseFloat(e.target.value).toFixed(dec):e.target.value;
+SLIDERS.forEach(([id, lbl, dec]) => {
+  document.getElementById(id).addEventListener("input", e => {
+    document.getElementById(lbl).textContent =
+      dec ? parseFloat(e.target.value).toFixed(dec) : e.target.value;
   });
 });
 
-(async()=>{
-  const msg=document.getElementById("loadMsg");
-  try{
-    msg.textContent="Loading Pyodide runtime\u2026";
-    const pyodide=await loadPyodide();
+/* ------------------------------------------------------------------ */
+/* Pyodide bootstrap                                                    */
+/* ------------------------------------------------------------------ */
 
-    msg.textContent="Loading NumPy\u2026";
+/**
+ * All Python source files that make up the simulation.
+ * They are fetched from the same origin and written into Pyodide's
+ * virtual filesystem under /cloth_sim/ so that normal package imports
+ * (``from solvers import SOLVERS``, etc.) resolve correctly.
+ */
+const PY_FILES = [
+  "constants.py",
+  "solvers/__init__.py",
+  "solvers/base.py",
+  "solvers/xpbd.py",
+  "solvers/projective.py",
+  "solvers/vbd.py",
+  "scenes/__init__.py",
+  "scenes/base.py",
+  "scenes/hanging.py",
+  "scenes/floor_collision.py",
+  "scenes/overconstrained.py",
+  "simulation.py",
+];
+
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`);
+  return r.text();
+}
+
+(async () => {
+  const msg   = document.getElementById("loadMsg");
+  const files = document.getElementById("loadFiles");
+
+  try {
+    /* 1 · Load Pyodide */
+    msg.textContent = "Loading Pyodide runtime\u2026";
+    const pyodide = await loadPyodide();
+
+    /* 2 · Load NumPy */
+    msg.textContent = "Loading NumPy\u2026";
     await pyodide.loadPackage("numpy");
 
-    msg.textContent="Starting simulation\u2026";
-    const resp=await fetch("simulation.py");
-    const code=await resp.text();
-    await pyodide.runPythonAsync(code);
+    /* 3 · Create virtual-filesystem layout */
+    msg.textContent = "Setting up Python packages\u2026";
+    await pyodide.runPythonAsync(`
+import os, sys
+os.makedirs("/cloth_sim/solvers", exist_ok=True)
+os.makedirs("/cloth_sim/scenes",  exist_ok=True)
+sys.path.insert(0, "/cloth_sim")
+`);
+
+    /* 4 · Fetch and write every Python file */
+    msg.textContent = "Loading Python modules\u2026";
+    for (const f of PY_FILES) {
+      files.textContent = f;
+      const src = await fetchText(f);
+      pyodide.FS.writeFile("/cloth_sim/" + f, src);
+    }
+    files.textContent = "";
+
+    /* 5 · Run simulation.py (which imports solvers/ and scenes/) */
+    msg.textContent = "Starting simulation\u2026";
+    const mainSrc = pyodide.FS.readFile("/cloth_sim/simulation.py", { encoding: "utf8" });
+    await pyodide.runPythonAsync(mainSrc);
 
     document.getElementById("overlay").classList.add("hidden");
-  }catch(err){
-    msg.textContent="Error: "+err.message;
+
+  } catch (err) {
+    msg.textContent = "Error: " + err.message;
+    files.textContent = "";
     console.error(err);
   }
 })();
